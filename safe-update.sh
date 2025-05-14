@@ -281,6 +281,47 @@ check_kernel_files() {
   fi
 }
 
+# Check GNOME version and ask if user wants to update
+check_gnome_update() {
+  # Check if GNOME is installed
+  if pacman -Q gnome-shell &>/dev/null; then
+    status "Checking GNOME Desktop Environment version..."
+    
+    # Get current installed version
+    CURRENT_GNOME=$(pacman -Q gnome-shell | awk '{print $2}')
+    
+    # Get latest available version - fix to make it more reliable
+    pacman -Sy >/dev/null 2>&1  # Refresh package database silently
+    LATEST_GNOME=$(pacman -Si gnome-shell | grep Version | awk '{print $3}')
+    
+    status "Current GNOME version: $CURRENT_GNOME"
+    status "Latest GNOME version available: $LATEST_GNOME"
+    
+    # Compare versions (simple string comparison, could be improved)
+    if [ "$CURRENT_GNOME" != "$LATEST_GNOME" ]; then
+      echo ""
+      read -p "Update GNOME to latest version? (y/N): " -n 1 -r
+      echo ""
+      if [[ $REPLY =~ ^[Yy]$ ]]; then
+        status "Will update GNOME to latest version during system update..."
+        # Set flag to not skip GNOME updates
+        export SKIP_GNOME_UPDATE=false
+      else
+        status "GNOME will NOT be updated to the latest version..."
+        # Set flag to skip GNOME updates
+        export SKIP_GNOME_UPDATE=true
+      fi
+    else
+      status "GNOME is already at the latest version"
+      export SKIP_GNOME_UPDATE=false
+    fi
+  else
+    # GNOME not installed
+    status "GNOME Desktop Environment not detected on this system"
+    export SKIP_GNOME_UPDATE=false
+  fi
+}
+
 # Perform the actual system update
 perform_update() {
   status "Updating pacman databases..."
@@ -291,16 +332,34 @@ perform_update() {
   # Get the actual user (not root)
   ACTUAL_USER=$(logname 2>/dev/null || echo $SUDO_USER)
 
+  # Prepare ignore packages list if needed
+  IGNORE_OPTS=""
+  if [ "$SKIP_GNOME_UPDATE" = true ]; then
+    status "Excluding GNOME packages from update..."
+    IGNORE_OPTS="--ignore gnome-shell,gnome-session,gnome-settings-daemon,gnome-control-center,mutter"
+  fi
+
   if command -v yay &>/dev/null; then
     # Use yay if available for AUR packages
     status "Using yay for system update (running as $ACTUAL_USER)"
-    sudo -u "$ACTUAL_USER" yay -Syu --noconfirm || {
-      warning "yay update failed! Falling back to pacman..."
-      pacman -Syu --noconfirm || error "pacman update failed!"
-    }
+    if [ -n "$IGNORE_OPTS" ]; then
+      sudo -u "$ACTUAL_USER" yay -Syu --noconfirm $IGNORE_OPTS || {
+        warning "yay update failed! Falling back to pacman..."
+        pacman -Syu --noconfirm $IGNORE_OPTS || error "pacman update failed!"
+      }
+    else
+      sudo -u "$ACTUAL_USER" yay -Syu --noconfirm || {
+        warning "yay update failed! Falling back to pacman..."
+        pacman -Syu --noconfirm || error "pacman update failed!"
+      }
+    fi
   else
     # Fall back to just pacman
-    pacman -Syu --noconfirm || error "pacman update failed!"
+    if [ -n "$IGNORE_OPTS" ]; then
+      pacman -Syu --noconfirm $IGNORE_OPTS || error "pacman update failed!"
+    else
+      pacman -Syu --noconfirm || error "pacman update failed!"
+    fi
   fi
 }
 
@@ -413,6 +472,9 @@ main() {
   check_boot_space || warning "Boot space check failed but continuing"
 
   check_arch_news || warning "Arch news check failed but continuing"
+
+  # Check GNOME version before updating
+  check_gnome_update || warning "GNOME version check failed but continuing"
 
   # Update system
   perform_update || {
